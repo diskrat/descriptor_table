@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h> 
+#include <stdint.h> // For UINT32_MAX
+#include <stdbool.h> // For boolean type
 
 #define MAX_USER_FDS 256
 #define INITIAL_CAPACITY 2
@@ -12,6 +14,7 @@ typedef struct {
     int kernel_fd;
     int ref_count;
     char* path;
+    bool is_permanent; // New field to track if the file is permanent
 } UserFD;
 
 typedef struct {
@@ -25,9 +28,13 @@ typedef struct {
 FD_Table descriptor_table;
 
 int check_fd_existence(const char* path) {
-    for (int i = 0; i < descriptor_table.size;i++) {
+    for (int i = 0; i < descriptor_table.size; i++) {
         if (descriptor_table.table[i].path != NULL && strcmp(descriptor_table.table[i].path, path) == 0) {
-            descriptor_table.table[i].ref_count++;
+            if (descriptor_table.table[i].ref_count < UINT32_MAX) {
+                descriptor_table.table[i].ref_count++;
+            } else {
+                descriptor_table.table[i].is_permanent = true;
+            }
             return i;
         }
     }
@@ -70,14 +77,22 @@ void user_fd_system_init() {
 }
 
 void user_fd_system_destroy() {
-    free(descriptor_table.table);
-    descriptor_table.table = NULL;
+    if (descriptor_table.table != NULL) {
+        for (int i = 0; i < descriptor_table.capacity; i++) {
+            if (descriptor_table.table[i].path != NULL) {
+                free(descriptor_table.table[i].path);
+                descriptor_table.table[i].path = NULL;
+            }
+        }
+        free(descriptor_table.table);
+        descriptor_table.table = NULL;
+    }
     descriptor_table.size = 0;
     descriptor_table.capacity = 0;
 }
 
 int user_open(const char* path, int flags, mode_t mode) {
-    pthread_mutex_lock(&descriptor_table.fd_lock);    
+    pthread_mutex_lock(&descriptor_table.fd_lock);
     int fd_n = check_fd_existence(path);
     if (fd_n != -1) {
         pthread_mutex_unlock(&descriptor_table.fd_lock);
@@ -103,6 +118,7 @@ int user_open(const char* path, int flags, mode_t mode) {
     descriptor_table.table[index].kernel_fd = kernel_fd;
     descriptor_table.table[index].ref_count = 1;
     descriptor_table.table[index].path = strdup(path);
+    descriptor_table.table[index].is_permanent = false;
     pthread_mutex_unlock(&descriptor_table.fd_lock);
     return index;
 }
@@ -120,6 +136,13 @@ int user_close(int user_fd) {
         fprintf(stderr, "File descriptor not in use: %d\n", user_fd);
         return -1;
     }
+
+    if (descriptor_table.table[user_fd].is_permanent) {
+        // File is permanent, do not decrement ref_count or close it
+        pthread_mutex_unlock(&descriptor_table.fd_lock);
+        return 0;
+    }
+
     descriptor_table.table[user_fd].ref_count--;
     if (descriptor_table.table[user_fd].ref_count == 0) {
         close(descriptor_table.table[user_fd].kernel_fd);
@@ -181,11 +204,46 @@ ssize_t user_write(int user_fd, const void* buf, size_t count) {
 }
 
 int user_dup(int old_user_fd) {
-    return -1;
+    if (old_user_fd < 0 || old_user_fd >= descriptor_table.capacity ||
+        descriptor_table.table[old_user_fd].kernel_fd == -1) {
+        return -1;
+    }
+
+    int new_user_fd = find_lowest_available();
+    if (new_user_fd == -1) {
+        return -1;
+    }
+
+    descriptor_table.table[new_user_fd] = descriptor_table.table[old_user_fd];
+    descriptor_table.table[new_user_fd].ref_count++;
+    return new_user_fd;
 }
 
 int user_dup2(int old_user_fd, int new_user_fd) {
-    return -1;
+    if (old_user_fd < 0 || old_user_fd >= descriptor_table.capacity ||
+        new_user_fd < 0 || new_user_fd >= MAX_USER_FDS ||
+        descriptor_table.table[old_user_fd].kernel_fd == -1) {
+        return -1;
+    }
+
+    if (old_user_fd == new_user_fd) {
+        return new_user_fd;
+    }
+
+    if (new_user_fd < descriptor_table.capacity &&
+        descriptor_table.table[new_user_fd].kernel_fd != -1) {
+        user_close(new_user_fd);
+    }
+
+    if (new_user_fd >= descriptor_table.capacity) {
+        while (descriptor_table.capacity <= new_user_fd) {
+            double_capacity();
+        }
+    }
+
+    descriptor_table.table[new_user_fd] = descriptor_table.table[old_user_fd];
+    descriptor_table.table[new_user_fd].ref_count++;
+    return new_user_fd;
 }
 
 int main() {
@@ -240,6 +298,29 @@ int main() {
 
     int invalid_fd = user_close(999); 
     printf("Closing invalid fd: %d\n", invalid_fd);
+
+    // Saturation test for ref_count
+    printf("Starting saturation test for ref_count...\n");
+    int fd_saturation = user_open("saturation_test.txt", O_CREAT | O_WRONLY, 0644);
+    if (fd_saturation == -1) {
+        printf("Failed to open saturation_test.txt\n");
+    } else {
+        for (uint32_t i = 0; i < UINT32_MAX; i++) {
+            if (user_open("saturation_test.txt", O_WRONLY, 0) == -1) {
+                printf("Failed to increment ref_count at iteration %u\n", i);
+                break;
+            }
+        }
+
+        // Check if the file is marked as permanent
+        if (descriptor_table.table[fd_saturation].is_permanent) {
+            printf("File saturation_test.txt is now permanent.\n");
+        } else {
+            printf("File saturation_test.txt is not marked as permanent.\n");
+        }
+
+        user_close(fd_saturation);
+    }
 
     user_fd_system_destroy();
     return 0;
