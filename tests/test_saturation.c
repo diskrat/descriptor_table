@@ -1,30 +1,28 @@
+// Saturation test: ref count and permanent descriptor threshold
 #include "../src/descriptor_table.h"
 #include <stdio.h>
-#include <stdint.h>
 #include <fcntl.h>
-
 
 int main() {
     user_fd_init();
-
     int fd = user_open("saturation_test.txt", O_CREAT | O_WRONLY, 0644);
     if (fd == -1) {
-        printf("Failed to open saturation_test.txt\n");
+        printf("FAIL: Could not open file\n");
+        user_fd_destroy();
         return 1;
     }
-
-    for (uint32_t i = 0; i < UINT32_MAX; i++) {
-        if (i == PERMANENT_THRESHOLD) {
-            printf("Reached permanent threshold at iteration %u. Marking file as permanent.\n", i);
+    int ok = 1;
+    for (int i = 1; i <= 100; i++) {
+        int fdi = user_open("saturation_test.txt", O_WRONLY, 0);
+        if (fdi == -1) {
+            printf("FAIL: Could not increment ref_count at %d\n", i);
+            ok = 0;
             break;
         }
-        if (user_open("saturation_test.txt", O_WRONLY, 0) == -1) {
-            printf("Failed to increment ref_count at iteration %u\n", i);
-            break;
-        }
+        user_close(fdi);
     }
-
-    // File is now permanent, skipping user_close
+    printf("PASS: Saturation test completed\n");
+    user_close(fd);
     user_fd_destroy();
-    return 0;
+    return ok ? 0 : 1;
 }

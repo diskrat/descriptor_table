@@ -75,25 +75,7 @@ void double_capacity()
     }
 }
 
-int user_open(char* path, int flags, mode_t mode) 
-{
-    pthread_rwlock_rdlock(&dt.fd_lock);
-    for (int i = 0; i < dt.capacity; i++) {
-        if (dt.table[i] && dt.table[i]->path != NULL && strcmp(dt.table[i]->path, path) == 0) {
-            pthread_rwlock_wrlock(&dt.table[i]->lock);
-            if (!dt.table[i]->is_permanent) {
-                dt.table[i]->ref_count++;
-                if (dt.table[i]->ref_count >= PERMANENT_THRESHOLD) {
-                    dt.table[i]->is_permanent = true;
-                }
-            }
-            pthread_rwlock_unlock(&dt.table[i]->lock);
-            pthread_rwlock_unlock(&dt.fd_lock);
-            return i;
-        }
-    }
-    pthread_rwlock_unlock(&dt.fd_lock);
-
+int user_open(char* path, int flags, mode_t mode) {
     pthread_rwlock_wrlock(&dt.fd_lock);
     int kernel_fd = open(path, flags, mode);
     if (kernel_fd == -1) {
@@ -112,18 +94,37 @@ int user_open(char* path, int flags, mode_t mode)
             break;
         }
     }
-    Descritor* desc = (Descritor*)malloc(sizeof(Descritor));
-    if (!desc) {
-        perror("Failed to allocate descriptor");
-        pthread_rwlock_unlock(&dt.fd_lock);
-        return -1;
+    
+    bool file_found = false;
+    for (int i = 0; i < dt.capacity; i++) {
+        if (dt.table[i] && dt.table[i]->path != NULL && strcmp(dt.table[i]->path, path) == 0) {
+            pthread_rwlock_wrlock(&dt.table[i]->lock);
+            if (!dt.table[i]->is_permanent) {
+                dt.table[i]->ref_count++;
+                if (dt.table[i]->ref_count >= PERMANENT_THRESHOLD) {
+                    dt.table[i]->is_permanent = true;
+                }
+            }
+            pthread_rwlock_unlock(&dt.table[i]->lock);
+            file_found = true;
+            dt.table[index] = dt.table[i];
+            break;
+        }
     }
-    desc->ref_count = 1;
-    desc->path = strdup(path);
-    desc->kernel_fd = kernel_fd;
-    desc->is_permanent = false;
-    pthread_rwlock_init(&desc->lock, NULL);
-    dt.table[index] = desc;
+    if(!file_found){ 
+        Descritor* desc = (Descritor*)malloc(sizeof(Descritor));
+        if (!desc) {
+            perror("Failed to allocate descriptor");
+            pthread_rwlock_unlock(&dt.fd_lock);
+            return -1;
+        } 
+        desc->ref_count = 1;
+        desc->path = strdup(path);
+        desc->kernel_fd = kernel_fd;
+        desc->is_permanent = false;
+        pthread_rwlock_init(&desc->lock, NULL);
+        dt.table[index] = desc;   
+    }
     pthread_rwlock_unlock(&dt.fd_lock);
     return index;
 }
@@ -143,23 +144,16 @@ int user_close(int user_fd)
         return -1;
     }
     desc->ref_count--;
-    int still_referenced = 0;
-    for (int i = 0; i < dt.capacity; i++) {
-        if (i != user_fd && dt.table[i] == desc) {
-            still_referenced = 1;
-            break;
-        }
-    }
     dt.table[user_fd] = NULL;
     dt.size--;
     if (user_fd < dt.capacity && user_fd < dt.lowest_id) {
         dt.lowest_id = user_fd;
     }
-    if (!desc->is_permanent && desc->ref_count == 0 && !still_referenced) {
+    if(!desc->is_permanent && desc->ref_count==0){
+        desc->kernel_fd = -1;
         free(desc->path);
         desc->path = NULL;
         close(desc->kernel_fd);
-        desc->kernel_fd = -1;
         pthread_rwlock_unlock(&desc->lock);
         pthread_rwlock_destroy(&desc->lock);
         free(desc);
@@ -207,32 +201,17 @@ ssize_t user_write(int user_fd, const void* buf, size_t count)
 
 int user_dup(int old_user_fd) 
 {
-    pthread_rwlock_rdlock(&dt.fd_lock);
-    pthread_rwlock_rdlock(&dt.table[old_user_fd]->lock);
+    pthread_rwlock_wrlock(&dt.fd_lock);
+    pthread_rwlock_wrlock(&dt.table[old_user_fd]->lock);
     if (old_user_fd < 0 || old_user_fd >= dt.capacity || dt.table[old_user_fd]->kernel_fd == -1) {
         pthread_rwlock_unlock(&dt.table[old_user_fd]->lock);
         pthread_rwlock_unlock(&dt.fd_lock);
         return -1;
     }
     if (dt.size >= dt.capacity) {
-        pthread_rwlock_unlock(&dt.table[old_user_fd]->lock);
-        pthread_rwlock_unlock(&dt.fd_lock);
         double_capacity();
-        pthread_rwlock_rdlock(&dt.fd_lock);
-        pthread_rwlock_rdlock(&dt.table[old_user_fd]->lock);
     }
-    int new_user_fd = -1;
-    for (int i = 0; i < dt.capacity; i++) {
-        if (!dt.table[i]) {
-            new_user_fd = i;
-            break;
-        }
-    }
-    if (new_user_fd == -1) {
-        pthread_rwlock_unlock(&dt.table[old_user_fd]->lock);
-        pthread_rwlock_unlock(&dt.fd_lock);
-        return -1;
-    }
+    int new_user_fd = dt.lowest_id;
     dt.table[old_user_fd]->ref_count++;
     dt.table[new_user_fd] = dt.table[old_user_fd];
     dt.size++;
@@ -250,7 +229,7 @@ int user_dup(int old_user_fd)
 int user_dup2(int old_user_fd, int new_user_fd) 
 {
     pthread_rwlock_rdlock(&dt.fd_lock);
-    pthread_rwlock_rdlock(&dt.table[old_user_fd]->lock);
+    pthread_rwlock_wrlock(&dt.table[old_user_fd]->lock);
     if (old_user_fd < 0 || old_user_fd >= MAX_USER_FDS ||
         new_user_fd < 0 || new_user_fd >= MAX_USER_FDS ||
         dt.table[old_user_fd]->kernel_fd == -1) {
@@ -270,10 +249,18 @@ int user_dup2(int old_user_fd, int new_user_fd)
             double_capacity();
         }
         pthread_rwlock_rdlock(&dt.fd_lock);
-        pthread_rwlock_rdlock(&dt.table[old_user_fd]->lock);
+        pthread_rwlock_wrlock(&dt.table[old_user_fd]->lock);
     }
+    int need_close = 0;
     if (new_user_fd < dt.capacity && dt.table[new_user_fd]) {
+        need_close = 1;
+    }
+    if (need_close) {
+        pthread_rwlock_unlock(&dt.table[old_user_fd]->lock);
+        pthread_rwlock_unlock(&dt.fd_lock);
         user_close(new_user_fd);
+        pthread_rwlock_rdlock(&dt.fd_lock);
+        pthread_rwlock_wrlock(&dt.table[old_user_fd]->lock);
     }
     if (new_user_fd >= dt.capacity) {
         int old_capacity = dt.capacity;
@@ -298,5 +285,4 @@ int user_dup2(int old_user_fd, int new_user_fd)
     pthread_rwlock_unlock(&dt.table[old_user_fd]->lock);
     pthread_rwlock_unlock(&dt.fd_lock);
     return new_user_fd;
-}
-
+}   
