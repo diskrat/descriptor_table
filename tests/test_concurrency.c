@@ -22,7 +22,7 @@ void* thread_func(void* arg) {
     snprintf(msg, sizeof(msg), "Hello from thread %d!\n", thread_id);
     user_write(fd, msg, strlen(msg));
     printf("Thread %d wrote: %s", thread_id, msg);
-    lseek(fd, 0, SEEK_SET);
+    user_lseek(fd, 0, SEEK_SET);
     char buf[128] = {0};
     ssize_t n = user_read(fd, buf, sizeof(buf)-1);
     if (n > 0) {

@@ -286,3 +286,18 @@ int user_dup2(int old_user_fd, int new_user_fd)
     pthread_rwlock_unlock(&dt.fd_lock);
     return new_user_fd;
 }   
+
+off_t user_lseek(int user_fd, off_t offset, int whence) {
+    if (user_fd < 0 || user_fd >= dt.capacity || !dt.table[user_fd]) {
+        return (off_t)-1;
+    }
+    pthread_rwlock_wrlock(&dt.table[user_fd]->lock);
+    if (dt.table[user_fd]->kernel_fd == -1) {
+        pthread_rwlock_unlock(&dt.table[user_fd]->lock);
+        return (off_t)-1;
+    }
+    int kernel_fd = dt.table[user_fd]->kernel_fd;
+    off_t result = lseek(kernel_fd, offset, whence);
+    pthread_rwlock_unlock(&dt.table[user_fd]->lock);
+    return result;
+}

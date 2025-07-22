@@ -37,4 +37,6 @@ ssize_t user_write(int user_fd, const void* buf, size_t count);
 int user_dup(int old_user_fd);
 int user_dup2(int old_user_fd, int new_user_fd);
 
+off_t user_lseek(int user_fd, off_t offset, int whence);
+
 #endif // DESCRIPTOR_TABLE_H

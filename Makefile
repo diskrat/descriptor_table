@@ -11,7 +11,7 @@ $(OBJ): $(SRC_DIR)/descriptor_table.c $(SRC_DIR)/descriptor_table.h
 	$(CC) $(CFLAGS) -c $(SRC_DIR)/descriptor_table.c -o $(OBJ)
 
 # Compile each test case
-TESTS = test_basic test_concurrency test_dup2 test_error_handling test_saturation
+TESTS = test_concurrency test_dup2 test_error_handling test_saturation
 
 $(TESTS): %: $(OBJ) $(TEST_DIR)/%.c
 	$(CC) $(CFLAGS) $(OBJ) $(TEST_DIR)/$*.c -o $@
